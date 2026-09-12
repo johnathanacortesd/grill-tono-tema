@@ -378,12 +378,44 @@ def prompt_sistema(cfg: dict) -> str:
         '{"resultados":[{"id":<numero de grupo>,"sub_tema":"<3 a 5 palabras>",'
         '"tono":"Positivo|Neutro|Negativo"}]}',
         'Un objeto por cada grupo recibido, con su id exacto.',
+        'El TONO se juzga SOLO con los pasajes que hablan de la entidad (o de sus voceros). El resto de',
+        'la nota es contexto para el sub_tema, no para el tono. Si la nota no menciona a la entidad,',
+        'el tono es Neutro.',
     ]
     return '\n'.join(lineas)
 
 
+
+def _pasajes_entidad(texto: str, titulo: str, brand: str, aliases: Sequence[str],
+                     voceros: Sequence[str] = (), max_chars: int = 1800) -> str:
+    """Solo lo que se dice de la entidad: las oraciones que la mencionan (o a un vocero).
+
+    El tono NO se juzga sobre la nota completa: se juzga sobre estos pasajes. Si la mencion es corta
+    se anexa la oración siguiente para no cortar la idea (una frase de 6 palabras suele necesitar su
+    continuacion: "La universidad fue escogida como sede" + detalle).
+    """
+    t = sq(texto)
+    if not t:
+        return sq(titulo)[:220]
+    objetivos = [nz(x) for x in [brand] + list(aliases or []) + list(voceros or []) if x and len(str(x)) > 3]
+    if not objetivos:
+        return sq(t)[:max_chars]
+    oraciones = [o.strip() for o in re.split(r'(?<=[.!?])\s+', t) if o.strip()]
+    seleccion = []
+    for i, o in enumerate(oraciones):
+        if any(obj in nz(o) for obj in objetivos):
+            bloque = [o]
+            if len(o.split()) < 12 and i + 1 < len(oraciones):
+                bloque.append(oraciones[i + 1])
+            seleccion.append(' '.join(bloque))
+    if not seleccion:
+        return ''
+    return ' '.join(seleccion)[:max_chars]
+
+
 def prompt_lote(grupos_lote: Sequence[dict], candidatos: Sequence[str],
-               brand: str = '', aliases: Sequence[str] = ()) -> str:
+               brand: str = '', aliases: Sequence[str] = (),
+               voceros: Sequence[str] = ()) -> str:
     bloques = []
     for g in grupos_lote:
         b = ['GRUPO id=%d (%d menciones)' % (g['grupo'], g['n']),
@@ -391,10 +423,13 @@ def prompt_lote(grupos_lote: Sequence[dict], candidatos: Sequence[str],
         if g.get('titulos_alt'):
             b.append('OTROS TITULARES DEL MISMO GRUPO: %s'
                      % ' // '.join(sq(t)[:120] for t in g['titulos_alt']))
-        ctx = sq(_contexto_marca(g.get('texto', ''), g.get('titulo', ''), brand, aliases)) if brand else ''
-        if ctx:
-            b.append('PASAJES QUE MENCIONAN A LA ENTIDAD: %s' % ctx[:1500])
-        b.append('TEXTO: %s' % sq(g.get('texto', ''))[:4000])
+        pasajes = _pasajes_entidad(g.get('texto', ''), g.get('titulo', ''), brand, aliases, voceros)
+        if pasajes:
+            b.append('LO QUE SE DICE DE LA ENTIDAD (decide el tono; nada mas cuenta): %s' % pasajes)
+        else:
+            b.append('LO QUE SE DICE DE LA ENTIDAD: (la nota no la menciona) -> el tono es Neutro')
+        b.append('CONTEXTO DEL HECHO (sirve para el sub_tema; NO decide el tono): %s'
+                 % sq(g.get('texto', ''))[:900])
         bloques.append('\n'.join(b))
     msg = '\n\n'.join(bloques)
     msg += '\n\nRecuerda: el sub_tema de cada grupo debe tener entre 3 y 5 palabras, y solo JSON.'
@@ -538,7 +573,8 @@ def etiquetar_grupos(cfg: dict, grupos: List[dict], progress: Optional[Callable]
         ids = [g['grupo'] for g in lote]
         sys_msg = [{'role': 'system', 'content': prompt_sistema(cfg)},
                    {'role': 'user', 'content': prompt_lote(
-                       lote, [], cfg.get('brand', ''), cfg.get('aliases') or [])}]
+                       lote, [], cfg.get('brand', ''), cfg.get('aliases') or [],
+                       cfg.get('voceros') or [])}]
         for intento in range(2):
             try:
                 txt = llamar_llm(cfg, sys_msg)
@@ -893,6 +929,7 @@ def enrich_rows_with_ai(
         'base_url': extra.get('base_url') or BASE_URL_DEFECTO,
         'timeout': int(extra.get('timeout', 120)),
     }
+    _ULTIMO_RESUMEN.clear()   # el resumen no arrastra las guardas de la corrida anterior
     modo_tax = extra.get('taxonomia')
     tax = None
     if isinstance(modo_tax, dict):
@@ -1188,8 +1225,9 @@ def aplicar_guarda_actor(grupos: Sequence[dict], etiquetas: Dict[int, dict], bra
         e = etiquetas.get(g['grupo'])
         if not e or e.get('tono') in (None, '', 'Duplicada'):
             continue
-        evidencia = _evidencia_actor('%s %s' % (g.get('titulo', ''), g.get('texto', '')),
-                                     brand, aliases, voceros)
+        # campos por separado: al normalizar se pierden los puntos y la ventana cruzaria
+        evidencia = (_evidencia_actor(g.get('texto', ''), brand, aliases, voceros)
+                     or _evidencia_actor(g.get('titulo', ''), brand, aliases, voceros))
         if e['tono'] == 'Positivo' and not evidencia:
             e['tono'] = 'Neutro'
             bajados.append(g['grupo'])

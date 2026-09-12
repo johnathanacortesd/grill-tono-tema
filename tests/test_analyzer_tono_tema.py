@@ -222,8 +222,9 @@ class TestMotorTonoTema(unittest.TestCase):
                  'titulos_alt': [], 'texto': 'Texto largo. La Universidad Simón Bolívar fue escogida '
                                              'como sede y su decano lo destacó. Más texto.'}
         prompt = A.prompt_lote([grupo], [], 'Universidad Simón Bolívar', ['Unisimón'])
-        self.assertIn('PASAJES QUE MENCIONAN A LA ENTIDAD', prompt)
+        self.assertIn('LO QUE SE DICE DE LA ENTIDAD', prompt)
         self.assertIn('escogida', prompt)
+        self.assertIn('NO decide el tono', prompt)      # el resto de la nota no decide el tono
 
     def test_guarda_actor_distingue_actor_de_direccion(self):
         """Ser sede escogida/organizador/colaborador es Positivo; que el evento solo ocurra ahí, no."""
@@ -272,6 +273,17 @@ class TestMotorTonoTema(unittest.TestCase):
         # el orden real del flujo es: actor primero y autor al final
         A.aplicar_regla_autor(grupos, et, ['José Consuegra'])
         self.assertEqual(et[1]['tono'], 'Positivo')
+
+    def test_pasajes_focalizan_el_tono_en_la_entidad(self):
+        """El texto se recorta a lo que se dice de la entidad (o de sus voceros)."""
+        texto = ('Otra frase de relleno sin la marca. La Universidad Simón Bolívar fue escogida como '
+                 'sede del congreso. Sigue texto irrelevante para el tono.')
+        p = A._pasajes_entidad(texto, 'Titular', 'Universidad Simón Bolívar', ['Unisimón'])
+        self.assertIn('escogida', p)
+        self.assertNotIn('relleno', p)
+        self.assertEqual(A._pasajes_entidad('Nota de otro tema.', 'T', 'Universidad X', []), '')
+        self.assertIn('Consuegra', A._pasajes_entidad('El rector José Consuegra explicó el plan. Fin.',
+                                                      'Columna', 'Universidad X', [], ['José Consuegra']))
 
 
 if __name__ == '__main__':
