@@ -6,3 +6,4 @@ venv/
 *.xlsx
 *.pkl
 *.log
+temas_*.json
