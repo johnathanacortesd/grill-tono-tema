@@ -180,6 +180,99 @@ class TestMotorTonoTema(unittest.TestCase):
             self.assertNotIn(A.nz(t), A.CUBO_PROHIBIDO)
         self.assertEqual(A.derivar_reglas(['Salud Mental y Prevencion'])[0]['tema'], 'Salud Mental y Prevencion')
 
+    def test_guarda_mencion_baja_positivos_de_temas_ajenos(self):
+        """Sin mención a la entidad no puede haber Positivo ni Negativo."""
+        casos = [
+            # (texto, tono que puso el modelo, tono esperado)
+            ('El congresista presentó un proyecto de paz barrial para los jóvenes de la ciudad',
+             'Positivo', 'Neutro'),                       # no menciona a la entidad
+            ('La Universidad Simón Bolívar fue escogida como sede de la asamblea internacional',
+             'Positivo', 'Positivo'),                     # sí la menciona: se respeta
+            ('Vecinos denuncian que una empresa contamina la ciénaga', 'Negativo', 'Neutro'),
+            ('La Asociación de Psiquiatría pidió reforzar la prevención del suicidio',
+             'Negativo', 'Neutro'),
+        ]
+        for texto, puesto, esperado in casos:
+            grupos = [{'grupo': 1, 'titulo': texto, 'texto': texto, 'autores': []}]
+            et = {1: {'tono': puesto, 'sub_tema': 'Hecho de prueba'}}
+            A.aplicar_guarda_mencion(grupos, et, 'Universidad Simón Bolívar', ['Unisimón'])
+            self.assertEqual(et[1]['tono'], esperado, texto[:60])
+
+    def test_regla_autor_positivo(self):
+        """Si la nota la firma un vocero de la entidad, es la entidad hablando en medios."""
+        grupos = [{'grupo': 1, 'titulo': 'LA IA Y LA RECONVERSIÓN LABORAL',
+                   'texto': 'Columna de opinión sobre inteligencia artificial y empleo.',
+                   'autores': ['José Consuegra']},
+                  {'grupo': 2, 'titulo': 'Nota de otro autor', 'texto': 'Texto cualquiera.',
+                   'autores': ['Redacción']}]
+        et = {1: {'tono': 'Neutro', 'sub_tema': 'Reconversión laboral'}, 2: {'tono': 'Neutro', 'sub_tema': 'Otro hecho'}}
+        cambiados = A.aplicar_regla_autor(grupos, et, ['José Consuegra (rector)', 'el rector'])
+        self.assertEqual(et[1]['tono'], 'Positivo')
+        self.assertEqual(et[2]['tono'], 'Neutro')
+        self.assertEqual(cambiados, [1])
+
+    def test_texto_fila_usa_el_cuerpo_cuando_el_resumen_viene_vacio(self):
+        fila = {'CuerpoEs': 'x' * 1200, 'Resumen - Aclaracion': '', 'resumen corto': ''}
+        self.assertEqual(len(A._texto_fila(fila, KEY_MAP)), 1200)
+        fila2 = {'CuerpoEs': 'corto', 'Resumen - Aclaracion': 'y' * 800}
+        self.assertEqual(len(A._texto_fila(fila2, KEY_MAP)), 800)
+
+    def test_prompt_incluye_los_pasajes_de_la_entidad(self):
+        grupo = {'grupo': 1, 'n': 2, 'titulo': 'Asamblea de criminología',
+                 'titulos_alt': [], 'texto': 'Texto largo. La Universidad Simón Bolívar fue escogida '
+                                             'como sede y su decano lo destacó. Más texto.'}
+        prompt = A.prompt_lote([grupo], [], 'Universidad Simón Bolívar', ['Unisimón'])
+        self.assertIn('PASAJES QUE MENCIONAN A LA ENTIDAD', prompt)
+        self.assertIn('escogida', prompt)
+
+    def test_guarda_actor_distingue_actor_de_direccion(self):
+        """Ser sede escogida/organizador/colaborador es Positivo; que el evento solo ocurra ahí, no."""
+        AL = ['Unisimón', 'la universidad']
+        casos = [
+            ('La Universidad Simón Bolívar realiza una cumbre internacional y recibe a 50 académicos',
+             True),
+            ('El decano de la Universidad Simón Bolívar destacó que la institución fue escogida como '
+             'sede de la asamblea', True),
+            ('El informe se presentó con la colaboración de dos universidades y la Universidad Simón '
+             'Bolívar', True),
+            ('El estudio fue elaborado por la Universidad de la Costa y el Macondo LAB de la '
+             'Universidad Simón Bolívar', True),
+            ('El simposio científico se realizará en el Salón Jorge Artel de la Universidad Simón '
+             'Bolívar', False),
+            ('El representante recordó su formación en la Universidad Simón Bolívar durante su '
+             'biografía', False),
+            ('El gobernador firmó una alianza para crear la Universidad de Atalaya', False),
+            ('El congresista obtuvo una maestría en la Universidad de los Andes y creó una fundación',
+             False),
+        ]
+        for texto, esperado in casos:
+            obtenido = A._evidencia_actor(texto, 'Universidad Simón Bolívar', AL)
+            self.assertEqual(obtenido, esperado, texto[:70])
+
+    def test_guarda_actor_solo_en_criterio_aspectual(self):
+        grupos = [{'grupo': 1, 'titulo': 'Nota sin evidencia de actor', 'texto': 'Texto.', 'autores': []}]
+        et = {1: {'tono': 'Positivo', 'sub_tema': 'Hecho cualquiera'}}
+        bajados, subidos = A.aplicar_guarda_actor(grupos, et, 'Universidad Simón Bolívar',
+                                                 ['Unisimón'], [], 'Favorabilidad del sector (para gremios)')
+        self.assertEqual(et[1]['tono'], 'Positivo')     # en sector no se toca
+        self.assertEqual((bajados, subidos), ([], []))
+        bajados, subidos = A.aplicar_guarda_actor(grupos, et, 'Universidad Simón Bolívar',
+                                                 ['Unisimón'], [], 'Aspectual estricto (recomendado)')
+        self.assertEqual(et[1]['tono'], 'Neutro')       # en aspectual sí
+        self.assertEqual(bajados, [1])
+
+    def test_orden_de_guardas_autor_gana(self):
+        """La nota firmada por un vocero queda Positivo aunque no haya evidencia de actor."""
+        grupos = [{'grupo': 1, 'titulo': 'LA IA Y LA RECONVERSIÓN LABORAL',
+                   'texto': 'Columna de opinión.', 'autores': ['José Consuegra']}]
+        et = {1: {'tono': 'Neutro', 'sub_tema': 'Reconversión laboral'}}
+        A.aplicar_regla_autor(grupos, et, ['José Consuegra'])
+        A.aplicar_guarda_actor(grupos, et, 'Universidad Simón Bolívar', ['Unisimón'],
+                               ['José Consuegra'], 'Aspectual estricto (recomendado)')
+        # el orden real del flujo es: actor primero y autor al final
+        A.aplicar_regla_autor(grupos, et, ['José Consuegra'])
+        self.assertEqual(et[1]['tono'], 'Positivo')
+
 
 if __name__ == '__main__':
     unittest.main()

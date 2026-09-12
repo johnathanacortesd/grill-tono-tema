@@ -116,7 +116,18 @@ sin sobre son su sus tal tambien tan tanto te tiene tienen todo todos tu tus un 
 # 2. Grupo de notas equivalentes (republicaciones y duplicados de contenido)
 # ============================================================================
 def _texto_fila(row: dict, km: dict) -> str:
-    return str(row.get('Resumen - Aclaracion') or row.get('resumen corto') or row.get('Resumen') or '')
+    """Texto de la nota: el MÁS COMPLETO disponible, no solo el resumen.
+
+    Trampa comprobada: hay dossiers donde 'Resumen - Aclaracion' viene vacío en casi todas las filas y
+    el único texto es el cuerpo ('CuerpoEs'). Analizando solo el resumen (o el titular) el tono se
+    inventa: la nota de la asamblea de criminología parecía neutra porque el párrafo donde el decano
+    destaca que la institución fue escogida como sede vivía en el cuerpo.
+    """
+    candidatos = [row.get('CuerpoEs'), row.get('Cuerpo'), row.get('Texto'),
+                  row.get('Texto completo'), row.get('Resumen - Aclaracion'),
+                  row.get('resumen corto'), row.get('Resumen'),
+                  row.get(km.get('resumen', 'Resumen - Aclaracion'))]
+    return max((str(c) for c in candidatos if c), key=len, default='')
 
 
 def _titulo_fila(row: dict, km: dict) -> str:
@@ -205,7 +216,10 @@ def construir_grupos(
         cuerpo = max((base[k]['texto'] for k in miembros), key=len)
         alt = [t for t in sorted(set(base[k]['titulo'] for k in miembros)) if t and t != rep][:3]
         grupos.append({'grupo': gid, 'n': len(idxs), 'idxs': idxs, 'titulo': rep,
-                       'titulos_alt': alt, 'texto': cuerpo[:900]})
+                       'titulos_alt': alt, 'texto': cuerpo,          # completo: la evidencia del
+                       # actor (una colaboración, un decano citado) puede estar en el último párrafo
+                       'autores': sorted({sq(str(rows[i].get('Autor - Conductor') or ''))
+                                          for i in idxs} - {''})})
         for i in idxs:
             mapa[i] = gid
     return grupos, mapa
@@ -368,7 +382,8 @@ def prompt_sistema(cfg: dict) -> str:
     return '\n'.join(lineas)
 
 
-def prompt_lote(grupos_lote: Sequence[dict], candidatos: Sequence[str]) -> str:
+def prompt_lote(grupos_lote: Sequence[dict], candidatos: Sequence[str],
+               brand: str = '', aliases: Sequence[str] = ()) -> str:
     bloques = []
     for g in grupos_lote:
         b = ['GRUPO id=%d (%d menciones)' % (g['grupo'], g['n']),
@@ -376,7 +391,10 @@ def prompt_lote(grupos_lote: Sequence[dict], candidatos: Sequence[str]) -> str:
         if g.get('titulos_alt'):
             b.append('OTROS TITULARES DEL MISMO GRUPO: %s'
                      % ' // '.join(sq(t)[:120] for t in g['titulos_alt']))
-        b.append('TEXTO: %s' % sq(g['texto'])[:900])
+        ctx = sq(_contexto_marca(g.get('texto', ''), g.get('titulo', ''), brand, aliases)) if brand else ''
+        if ctx:
+            b.append('PASAJES QUE MENCIONAN A LA ENTIDAD: %s' % ctx[:1500])
+        b.append('TEXTO: %s' % sq(g.get('texto', ''))[:4000])
         bloques.append('\n'.join(b))
     msg = '\n\n'.join(bloques)
     msg += '\n\nRecuerda: el sub_tema de cada grupo debe tener entre 3 y 5 palabras, y solo JSON.'
@@ -519,7 +537,8 @@ def etiquetar_grupos(cfg: dict, grupos: List[dict], progress: Optional[Callable]
     def trabajo(lote):
         ids = [g['grupo'] for g in lote]
         sys_msg = [{'role': 'system', 'content': prompt_sistema(cfg)},
-                   {'role': 'user', 'content': prompt_lote(lote, [])}]
+                   {'role': 'user', 'content': prompt_lote(
+                       lote, [], cfg.get('brand', ''), cfg.get('aliases') or [])}]
         for intento in range(2):
             try:
                 txt = llamar_llm(cfg, sys_msg)
@@ -924,11 +943,27 @@ def enrich_rows_with_ai(
                                             'reglas': list(tax.get('reglas') or []),
                                             'nota': tax.get('nota', '')}
 
+    # --- guardas del tono, en orden ---
+    sin_mencion = aplicar_guarda_mencion(grupos, etiquetas, brand, aliases, cfg.get('voceros') or [])
+    if sin_mencion:
+        _ULTIMO_RESUMEN['tono_corregido_sin_mencion'] = sin_mencion
     corregidos = aplicar_guarda_tono(grupos, etiquetas, brand, aliases)
     if corregidos:
         _ULTIMO_RESUMEN['tono_corregido_por_guarda'] = corregidos
-        if progress_callback:
-            progreso(93, 'Guarda del tono: %d Negativos sin señalamiento pasaron a Neutro' % len(corregidos))
+    bajados, subidos = aplicar_guarda_actor(grupos, etiquetas, brand, aliases,
+                                            cfg.get('voceros') or [], cfg.get('criterio', ''))
+    if bajados:
+        _ULTIMO_RESUMEN['tono_bajado_sin_evidencia_actor'] = bajados
+    if subidos:
+        _ULTIMO_RESUMEN['tono_subido_por_evidencia_actor'] = subidos
+    # la voz de la entidad manda: si lo firma un vocero, es Positivo (va al final)
+    por_autor = aplicar_regla_autor(grupos, etiquetas, cfg.get('voceros') or [])
+    if por_autor:
+        _ULTIMO_RESUMEN['tono_positivo_por_autor'] = por_autor
+    if progress_callback and (sin_mencion or corregidos or por_autor or bajados or subidos):
+        progreso(93, 'Guardas del tono: %d sin mención · %d Negativos sin señalamiento · %d por autor · '
+                     '%d sin evidencia de actor · %d con evidencia de actor'
+                 % (len(sin_mencion), len(corregidos), len(por_autor), len(bajados), len(subidos)))
 
     # --- tema por reglas + lista cerrada ---
     temas, origen = asignar_temas(cfg, grupos, etiquetas, tax, progreso)
@@ -1031,3 +1066,134 @@ def aplicar_guarda_tono(grupos: Sequence[dict], etiquetas: Dict[int, dict],
             e['tono'] = 'Neutro'
             corregidos.append(g['grupo'])
     return corregidos
+
+def _menciona_entidad(texto: str, brand: str, aliases: Sequence[str],
+                      voceros: Sequence[str] = ()) -> bool:
+    """True si el texto nombra a la entidad, alguno de sus alias o a uno de sus voceros."""
+    t = nz(texto)
+    if not t:
+        return False
+    objetivos = [nz(x) for x in [brand] + list(aliases or []) + list(voceros or []) if x and len(str(x)) > 3]
+    return any(o and o in t for o in objetivos)
+
+
+def aplicar_guarda_mencion(grupos: Sequence[dict], etiquetas: Dict[int, dict], brand: str,
+                           aliases: Sequence[str], voceros: Sequence[str] = ()) -> List[int]:
+    """Sin mención a la entidad no puede haber Positivo ni Negativo (baja a Neutro).
+
+    Es el sesgo simétrico del Negativo espurio: con el texto vacío o ajeno, el modelo marcaba Positivo
+    notas de terceros (un proyecto de ley, una fundación, el perfil de un funcionario).
+    """
+    corregidos = []
+    for g in grupos:
+        e = etiquetas.get(g['grupo'])
+        if not e or e.get('tono') not in ('Positivo', 'Negativo'):
+            continue
+        texto = '%s %s' % (g.get('titulo', ''), g.get('texto', ''))
+        if not _menciona_entidad(texto, brand, aliases, voceros):
+            e['tono'] = 'Neutro'
+            corregidos.append(g['grupo'])
+    return corregidos
+
+
+def aplicar_regla_autor(grupos: Sequence[dict], etiquetas: Dict[int, dict],
+                        voceros: Sequence[str] = ()) -> List[int]:
+    """Si la nota la firma un vocero de la entidad, el tono es Positivo (la entidad habla en medios)."""
+    if not voceros:
+        return []
+    objetivos = [nz(v) for v in voceros if v and len(str(v)) > 5]
+    cambiados = []
+    for g in grupos:
+        e = etiquetas.get(g['grupo'])
+        if not e or e.get('tono') == 'Positivo':
+            continue
+        for autor in g.get('autores') or []:
+            a = nz(autor)
+            if a and any(o and (o in a or a in o) for o in objetivos):
+                e['tono'] = 'Positivo'
+                cambiados.append(g['grupo'])
+                break
+    return cambiados
+
+# ============================================================================
+# 9b. Evidencia de actor: la entidad ACTUA (no solo es la direccion del evento)
+# ============================================================================
+# Medido: un modelo chico no aplica la clausula "actor, no solo direccion" por si solo (la asamblea
+# donde la institucion fue escogida sede seguia saliendo Neutra). Estas guardas la aplican en codigo,
+# SOLO para el criterio aspectual: en el de sector el tono depende de como queda el sector, no de que
+# el gremio actúe.
+def _mascara_otras_universidades(t: str) -> str:
+    """Neutraliza nombres de OTRAS universidades para que el alias genérico no dispare por error.
+
+    Caso real: 'la universidad' (alias del cliente) matcheaba 'la universidad de los andes' y el
+    patrón de actor daba Positivo en una nota donde la entidad solo aparecía en la biografía de un
+    tercero.
+    """
+    otras = ('universidad de los andes', 'universidad del norte', 'universidad de atalaya',
+             'universidad de la sabana', 'universidad del rosario', 'universidad de antioquia',
+             'universidad de cartagena', 'universidad popular del cesar', 'universidad del cesar',
+             'universidad san buenaventura', 'universidad de san buenaventura',
+             'universidad autonoma del caribe', 'universidad de la costa', 'universidad ces',
+             'universidad de concepcion', 'universidad jorge tadeo lozano', 'universidad del algarve',
+             'universidad del magdalena', 'universidad de cordoba', 'universidad de sucre',
+             'universidad tecnologica', 'universidad autonoma', 'universidad distrital')
+    for o in otras:
+        t = t.replace(o, ' otrauniversidad ')
+    return re.sub(r'\buniversidad\s+(?:de|del)\s+\w+', ' otrauniversidad ', t)
+
+
+def _evidencia_actor(texto: str, brand: str, aliases: Sequence[str],
+                     voceros: Sequence[str] = ()) -> bool:
+    """True si algun pasaje muestra a la entidad organizando, como sede escogida, colaborando o hablando.
+
+    Distingue ACTOR de DIRECCION: que un evento de terceros ocurra 'en la Universidad X' no es
+    evidencia; que la entidad organice, sea sede escogida, colabore en un estudio o que alguien de
+    la entidad hable en la nota, sí.
+    """
+    t = _mascara_otras_universidades(nz(texto))
+    if not t:
+        return False
+    entes = [nz(x) for x in [brand] + list(aliases or []) + list(voceros or []) if x and len(str(x)) > 3]
+    entes = [e for e in entes if e and 'la universidad' != e] or [nz(brand)] if entes else []
+    if not entes:
+        return False
+    ent = '(?:%s)' % '|'.join(re.escape(e) for e in entes if e)
+    # "la universidad" solo cuenta si NO va seguida de otro nombre (ya enmascarado arriba)
+    verbos = (r're[uú]ne|reuni[oó]|realiza|realiz[oó]|organiza|organiz[oó]|convoca|convoc[oó]|'
+              r'recibe|recibi[oó]|ser[aá] sede|es sede|presenta|present[oó]|destaca|destac[oó]|'
+              r'subraya|subray[oó]|anuncia|anunci[oó]|inaugura|inaugur[oó]|gradu[oó]|lidera|lanz[oó]|'
+              r'firma|firm[oó]|aporta|aport[oó]|adelanta|ejecuta|escogida|elegida|seleccionada')
+    patrones = [
+        r'%s[^.]{0,30}\b(?:%s)' % (ent, verbos),                                  # la entidad organiza/reúne
+        r'(?:con el (?:acompañamiento|apoyo|respaldo)|en (?:alianza|articulaci[oó]n)|'
+        r'colaboraci[oó]n|de la mano)[^.]{0,180}%s' % ent,                         # aliado o colaborador
+        r'(?:elaborad|publicad|desarrollad|realizad)\w*\s+por[^.]{0,140}%s' % ent,
+        r'(?:escogida|elegida|seleccionada) como sede[^.]{0,60}%s' % ent,
+        r'%s[^.]{0,60}(?:escogida|elegida|seleccionada) como sede' % ent,
+        r'(?:decano|rector|director|directora|docente|investigador|investigadora|profesor|profesora|'
+        r'presidente|vicepresidente)\b[^.]{0,60}\b(?:de la|de el|del)\s+%s' % ent,
+        r'(?:director|decano|rector)[^.]{0,80}(?:del programa|de la facultad)[^.]{0,60}%s' % ent,
+    ]
+    return any(re.search(p, t) for p in patrones)
+
+
+def aplicar_guarda_actor(grupos: Sequence[dict], etiquetas: Dict[int, dict], brand: str,
+                         aliases: Sequence[str], voceros: Sequence[str] = (),
+                         criterio: str = '') -> Tuple[List[int], List[int]]:
+    """Ajusta el tono con la evidencia de actor. Devuelve (bajados a Neutro, subidos a Positivo)."""
+    if not str(criterio or '').lower().startswith('aspectual'):
+        return [], []
+    bajados, subidos = [], []
+    for g in grupos:
+        e = etiquetas.get(g['grupo'])
+        if not e or e.get('tono') in (None, '', 'Duplicada'):
+            continue
+        evidencia = _evidencia_actor('%s %s' % (g.get('titulo', ''), g.get('texto', '')),
+                                     brand, aliases, voceros)
+        if e['tono'] == 'Positivo' and not evidencia:
+            e['tono'] = 'Neutro'
+            bajados.append(g['grupo'])
+        elif e['tono'] == 'Neutro' and evidencia:
+            e['tono'] = 'Positivo'
+            subidos.append(g['grupo'])
+    return bajados, subidos

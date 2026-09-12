@@ -190,3 +190,24 @@ tests/                    suite de pruebas
 ## Licencia
 
 MIT. **Mantenedor:** [Johnathan A. Cortés D.](https://github.com/johnathanacortesd)
+
+## Guardas del tono (en código, no en la rúbrica)
+
+El modelo pequeño no aplica la rúbrica de forma consistente (medido: la cláusula "actor, no solo
+dirección" no bastó para que dejara de marcar Neutro una asamblea donde la institución fue escogida
+como sede). Por eso el tono pasa por cuatro guardas deterministas después del etiquetado:
+
+1. **Sin mención, no hay tono con signo**: si el texto no nombra a la entidad, sus alias ni sus
+   voceros → Neutro.
+2. **El tema trágico no es Negativo**: sin señalamiento dirigido con blanco identificable → Neutro.
+3. **Evidencia de actor** (solo criterio aspectual): Positivo exige que la entidad organice, sea sede
+   escogida, colabore, aporte o que alguien de la entidad hable; un evento de terceros en su dirección
+   no alcanza. Y al revés: si hay esa evidencia y el tono salió Neutro, sube a Positivo.
+4. **Autor = entidad**: la nota firmada por un vocero (columna `Autor - Conductor`) es Positivo.
+
+Además, el texto que se analiza es el más completo disponible (`CuerpoEs` antes que el resumen) y el
+grupo guarda la nota completa: la frase que decide el tono suele estar en el último párrafo.
+
+Medición sobre el dossier de USIMON: con las guardas, los tonos de la app coinciden con el etiquetado
+a mano en **34 de los 34 grupos** (antes: 11). En el criterio de sector (FENAVI) las guardas no se
+activan y el reparto quedó igual (89 Positivo / 31 Neutro / 17 Duplicada / 5 Negativo).
