@@ -39,6 +39,7 @@ análisis de Tono, Tema y Sub-tema por el motor de reglas + IA de `menciones-ton
 | Sin validación del texto de la etiqueta | **Validador duro** (3-7 palabras, sin verbo inicial, sin preposición final, sin rótulos) + ciclo de reparación |
 | Tema inventado por el modelo | **Lista cerrada de cubos** por tipo de cliente, asignada por reglas; el modelo solo elige dentro de la lista o propone un cubo nuevo específico |
 | Etiquetas por fila con agrupación heurística | Agrupación determinista de notas equivalentes (título + palabras de contenido + 5-gramas) y etiqueta única por grupo |
+| Tono decidido por el modelo | Tono con **verificación múltiple** (mayoría) + **guarda determinista**: sin señalamiento dirigido no hay Negativo |
 | Sin control de cubos vacíos | **Nunca "Otros"**: si nada encaja, cubo nuevo específico; en último caso, el cubo más cercano |
 
 ---
@@ -63,10 +64,27 @@ de la marca, sin verbos conjugados al inicio y sin etiquetas de categoría. Los 
 viajan como `CANDIDATOS` en cada lote, y al final una pasada determinista de canonización unifica
 variantes del mismo hecho.
 
-**Tema**: cubo de una lista cerrada (21 cubos para gobierno territorial, 16 para gremio o sector).
-Se asigna por reglas léxicas mirando primero el sub-tema y solo después el título (y solo si el título
-mide ≤160 caracteres). Los cubos nuevos propuestos por la IA se canonizan si son variantes del mismo
-nombre. La interfaz muestra cuántos Temas salieron por regla, por IA y qué cubos nuevos aparecieron.
+**Tema**: los cubos se generan **a partir del contenido del propio archivo** (los clientes son muy
+distintos: universidades, sector público, privado, marcas, gremios, y no hay una lista fija que sirva
+para todos). El proceso es: se agrupan los hechos, la IA propone cubos por bloques, una consolidación
+elimina duplicados y solapamientos, y el resultado se usa como lista cerrada. De esa lista se derivan
+reglas léxicas para un primer pase determinista y la IA solo interviene en lo que no casa por regla.
+También puedes **descargar la lista generada** y volver a subirla en el próximo período del mismo
+cliente para que los Temas sean idénticos entre meses (imprescindible para comparar en Power BI). Si
+prefieres una lista fija, la interfaz ofrece las de gobierno territorial y gremio.
+
+**Estabilización del tono (dos mecanismos, porque el modelo es pequeño):**
+
+1. **Verificación múltiple**: cada grupo se etiqueta N veces (2 por defecto) y gana la mayoría; en un
+   empate el tono cae a Neutro, que es la regla de prudencia.
+2. **Guarda determinista del tono**: si un grupo quedó Negativo y el texto solo describe un hecho
+   trágico (robo, El Niño, protesta, accidente, inundación, alza de precios…) sin un señalamiento con
+   blanco identificable, pasa a Neutro. Es la regla del criterio escrita en código, no delegada al
+   modelo. La interfaz informa cuántos casos corrigió la guarda.
+
+Medición sobre el dossier de FENAVI (142 menciones, 99 grupos, `gpt-4.1-nano-2025-04-14`, criterio de
+sector): la guarda bajó los Negativos de 9 a 2 por mención, y los dos que quedan son señalamientos
+reales (vertimientos de una empresa del sector y denuncias por olores de gallineros).
 
 Medición con etiquetas humanas (20 grupos de un dossier real, `gpt-4.1-nano-2025-04-14`):
 95 % de coincidencia en tono y cero etiquetas inválidas, con 10 grupos por llamada.
@@ -82,7 +100,9 @@ Medición con etiquetas humanas (20 grupos de un dossier real, `gpt-4.1-nano-202
 5. **Modelos PKL del cliente** (opcional): el PKL de tono y/o el de tema sobreescriben el eje
    correspondiente; el sub-tema nunca se reemplaza por PKL.
 6. **Ajustes finos**: grupos por llamada (10 recomendado con nano), llamadas en paralelo (4-8 para
-   dossiers grandes), umbral de similitud de titulares y de resúmenes.
+   dossiers grandes), verificaciones del tono por grupo (2 por defecto), cubos objetivo cuando la lista
+   es automática, umbrales de similitud de titulares y de resúmenes, y carga de una lista de Temas en
+   JSON para reutilizarla con el mismo cliente.
 
 ---
 
@@ -132,9 +152,9 @@ python -m unittest tests/test_analyzer_tono_tema.py tests/test_pkl_classifier.py
                    tests/test_pkl_subtema_grouping.py tests/test_link_export_style.py
 ```
 
-- `test_analyzer_tono_tema.py` (8): agrupación de notas equivalentes, validador, reparación,
-  duplicadas, canonización de cubos, rechazo de cubos genéricos y criterio de sector. **Sin API**: el
-  modelo va simulado y devuelve etiquetas malas a propósito.
+- `test_analyzer_tono_tema.py` (11): agrupación de notas equivalentes, validador, reparación,
+  duplicadas, canonización de cubos, rechazo de cubos genéricos, criterio de sector, **guarda del tono**,
+  **votación por mayoría** y **taxonomía automática**. **Sin API**: el modelo va simulado.
 - `test_pkl_classifier.py` (16), `test_pkl_subtema_grouping.py` (6) y `test_link_export_style.py` (3):
   herencia de Grill-API para los clasificadores PKL y el formato del export.
 

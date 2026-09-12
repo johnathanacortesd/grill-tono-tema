@@ -135,6 +135,51 @@ class TestMotorTonoTema(unittest.TestCase):
         self.assertIn('sector', sector)
         self.assertIn('P1.', sector)
 
+    def test_guarda_tono_baja_los_falsos_negativos(self):
+        casos = [
+            ('Roban 180.000 huevos en una granja y la denuncia oportuna de la comunidad permitio '
+             'recuperar los camiones', 'Neutro'),
+            ('El Nino enciende las alarmas: crece el riesgo para el agua y la energia', 'Neutro'),
+            ('Un fallo del Consejo de Estado le pone limites al derecho a la protesta', 'Neutro'),
+            ('Campesinos denuncian que una empresa vierte aguas residuales en una quebrada', 'Negativo'),
+            ('Vecinos denuncian que Mac Pollo contamina la cienaga con vertimientos', 'Negativo'),
+        ]
+        for texto, esperado in casos:
+            grupos = [{'grupo': 1, 'titulo': texto, 'texto': texto}]
+            et = {1: {'tono': 'Negativo', 'sub_tema': 'x'}}
+            A.aplicar_guarda_tono(grupos, et, 'Universidad Simon Bolivar', ['la universidad'])
+            self.assertEqual(et[1]['tono'], esperado, texto[:60])
+
+    def test_voto_mayoria_empata_en_neutro(self):
+        votos = [{1: {'sub_tema': 'Robo en granja', 'tono': 'Negativo'}},
+                 {1: {'sub_tema': 'Robo en granja', 'tono': 'Neutro'}},
+                 {1: {'sub_tema': 'Robo en la granja', 'tono': 'Positivo'}}]
+        comb = A._voto_mayoria(votos, [1])
+        self.assertEqual(comb[1]['tono'], 'Neutro')
+        self.assertEqual(comb[1]['sub_tema'], 'Robo en granja')
+
+    def test_taxonomia_automatica_desde_el_archivo(self):
+        temas = ['Eventos y Congresos', 'Salud Mental y Prevencion', 'Seguridad y Criminologia']
+
+        def _stub(cfg, mensajes, **kw):
+            prompt = ' '.join(m['content'] for m in mensajes)
+            if 'Propón entre 10 y 14' in prompt or 'CUBOS TEMATICOS' in prompt:
+                return json.dumps({'cubos': temas + ['Otros', 'Varios temas']}, ensure_ascii=False)
+            return json.dumps({'cubos': temas + ['Informacion general']}, ensure_ascii=False)
+
+        real = A.llamar_llm
+        A.llamar_llm = _stub
+        try:
+            tax = A.proponer_taxonomia({'api_key': 'x', 'model': 'stub'},
+                                       [{'grupo': 1, 'titulo': 'Congreso de criminologia'}], {1: {}})
+        finally:
+            A.llamar_llm = real
+        self.assertGreaterEqual(len(tax['temas']), 3)
+        self.assertTrue(tax['reglas'], 'la taxonomia debe traer reglas para el primer pase')
+        for t in tax['temas']:
+            self.assertNotIn(A.nz(t), A.CUBO_PROHIBIDO)
+        self.assertEqual(A.derivar_reglas(['Salud Mental y Prevencion'])[0]['tema'], 'Salud Mental y Prevencion')
+
 
 if __name__ == '__main__':
     unittest.main()

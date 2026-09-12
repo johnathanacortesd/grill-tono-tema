@@ -3,6 +3,7 @@
 # ======================================
 import html
 import io
+import json
 import logging
 import re
 import time
@@ -500,10 +501,14 @@ def main():
                 )
                 tax_nombre = st.selectbox(
                     "Lista de Temas",
-                    ["Gobierno territorial (21 cubos)", "Gremio o sector (16 cubos)"],
+                    ["Automática según el archivo (recomendada)",
+                     "Gobierno territorial (21 cubos)",
+                     "Gremio o sector (16 cubos)"],
                     index=0,
-                    help="Los Temas son una lista cerrada por tipo de cliente y se asignan por reglas; "
-                         "la IA solo elige dentro de la lista o propone un cubo nuevo específico.",
+                    help="Los clientes son muy distintos (universidades, sector público, privado, marcas), "
+                         "así que lo recomendado es que la lista de Temas se genere leyendo los hechos "
+                         "de este archivo. También puedes reutilizar la lista de un cliente concreta o "
+                         "cargar una en JSON.",
                 )
 
             with st.expander("⚙ Ajustes finos del análisis (opcional)"):
@@ -520,6 +525,18 @@ def main():
                                                          "muchos medios con titulares distintos.")
                 with cd:
                     umbral_cuerpo_input = st.slider("Similitud de resúmenes (%)", 70, 100, 85, 1)
+                tax_file = st.file_uploader(
+                    "Reutilizar la lista de Temas de un cliente (JSON, opcional)",
+                    type=["json"], key="tax_json",
+                    help="Si subes la lista que descargaste de un período anterior del mismo cliente, "
+                         "los Temas se mantienen idénticos entre meses (mejor para comparar).",
+                )
+                cubos_objetivo_input = st.slider("Cubos objetivo cuando la lista es automática", 8, 25, 16, 1)
+                votos_input = st.slider(
+                    "Verificaciones del tono por grupo", 1, 3, 2, 1,
+                    help="Cada grupo se etiqueta N veces y gana la mayoría; un empate cae a Neutro. "
+                         "Con 2 se reducen los vaivenes de los modelos pequeños; con 3 sube el costo "
+                         "una vez más.")
 
             st.markdown('<div class="sec-label">3. Modelos PKL del cliente (opcional)</div>', unsafe_allow_html=True)
             st.markdown(
@@ -568,6 +585,16 @@ def main():
                     aliases_parsed = [
                         a.strip() for a in re.split(r"[,;]", alias_input) if a.strip()
                     ]
+                    tax_cargada = None
+                    if tax_file is not None:
+                        try:
+                            tax_cargada = json.loads(tax_file.getvalue().decode("utf-8"))
+                            if not isinstance(tax_cargada, dict) or not tax_cargada.get("temas"):
+                                raise ValueError("el JSON debe traer la clave 'temas' con la lista de cubos")
+                            tax_cargada.setdefault("reglas", [])
+                        except Exception as exc:
+                            st.error(f"La lista de Temas (JSON) no es válida: {exc}")
+                            st.stop()
                     tone_bytes = f_tono.getvalue() if f_tono else None
                     theme_bytes = f_tema.getvalue() if f_tema else None
                     try:
@@ -591,7 +618,9 @@ def main():
                             "aliases": aliases_parsed,
                             "voceros": [v.strip() for v in re.split(r"[,;]", voceros_input) if v.strip()],
                             "criterio": criterio,
-                            "taxonomia": tax_nombre,
+                            "taxonomia": tax_cargada if tax_cargada else tax_nombre,
+                            "cubos_objetivo": int(cubos_objetivo_input),
+                            "votos": int(votos_input),
                             "permitir_cubos_nuevos": True,
                             "tam_lote": int(tam_lote_input),
                             "workers": int(workers_input),
@@ -634,9 +663,15 @@ def main():
             por_llm = analisis.get("temas_por_llm")
             fallback = len(analisis.get("grupos_con_fallback") or [])
             errores = analisis.get("errores_api") or []
+            guarda = len(analisis.get("tono_corregido_por_guarda") or [])
+            votos = analisis.get("votos_tono")
             piezas = []
             if grupos:
                 piezas.append(f"{grupos} hechos únicos agrupados")
+            if votos:
+                piezas.append(f"tono verificado {votos}× por grupo")
+            if guarda:
+                piezas.append(f"guarda del tono: {guarda} Negativos sin señalamiento pasaron a Neutro")
             if reglas is not None:
                 piezas.append(f"Tema por reglas: {reglas} · por IA: {por_llm or 0}")
             if cubos_nuevos:
@@ -647,6 +682,26 @@ def main():
                 st.info("Análisis de Tono/Tema/Sub-tema · " + " · ".join(piezas))
             if errores:
                 st.caption("Avisos del modelo: " + " | ".join(map(str, errores[:2])))
+            temas_gen = analisis.get("taxonomia") or []
+            detalle_tax = analisis.get("taxonomia_detalle") or {}
+            if temas_gen:
+                modo = analisis.get("modo_taxonomia")
+                etiqueta = ("generada desde el archivo" if modo == "automatica"
+                            else "lista fija del cliente")
+                with st.expander("Lista de Temas usada (%d cubos, %s)" % (len(temas_gen), etiqueta),
+                                 expanded=(modo == "automatica")):
+                    st.markdown(" · ".join("`%s`" % t for t in temas_gen))
+                    if detalle_tax:
+                        st.download_button(
+                            "⬇ Descargar lista de Temas (JSON) para reutilizarla",
+                            data=json.dumps(detalle_tax, ensure_ascii=False, indent=1),
+                            file_name="temas_%s.json" % str(
+                                st.session_state.get("output_filename", "cliente")).replace(".xlsx", ""),
+                            mime="application/json",
+                        )
+                        st.caption("Súbela en «Reutilizar la lista de Temas de un cliente» para que el "
+                                   "próximo período del mismo cliente use los mismos Temas y puedas "
+                                   "comparar entre meses.")
         
         st.markdown(f"""
         <div class="metrics-grid">

@@ -469,16 +469,48 @@ def _normaliza_label(d: dict, ids_lote: Sequence[int]) -> Dict[int, dict]:
     return salida
 
 
+def _voto_mayoria(por_grupo: List[Dict[int, dict]], ids_lote: Sequence[int]) -> Dict[int, dict]:
+    """Combina las pasadas de votacion: gana el tono mas votado (empate -> Neutro) y el sub-tema
+    mas repetido (empate -> el mas corto). Reduce el ruido de los modelos pequenos en los casos
+    limite: si una nota sale Negativa en una pasada y Neutra en otra, queda Neutra."""
+    salida = {}
+    for gid in ids_lote:
+        tonos = [v[gid]['tono'] for v in por_grupo if gid in v and v[gid].get('tono')]
+        subs = [v[gid]['sub_tema'] for v in por_grupo if gid in v and v[gid].get('sub_tema')]
+        if not tonos and not subs:
+            continue
+        c = Counter(tonos)
+        top = c.most_common()
+        if not top:
+            tono = 'Neutro'
+        elif len(top) > 1 and top[0][1] == top[1][1]:
+            tono = 'Neutro' if 'Neutro' in [top[0][0], top[1][0]] else top[0][0]
+        else:
+            tono = top[0][0]
+        cs = Counter(nz(s) for s in subs)
+        if not cs:
+            sub = ''
+        else:
+            maxrep = max(cs.values())
+            candidatos = [s for s in subs if cs[nz(s)] == maxrep]
+            sub = min(candidatos, key=len)
+        salida[gid] = {'sub_tema': sub, 'tono': tono}
+    return salida
+
+
 def etiquetar_grupos(cfg: dict, grupos: List[dict], progress: Optional[Callable] = None,
                      tam_lote: int = TAM_LOTE_DEFECTO, workers: int = WORKERS_DEFECTO,
-                     max_reparaciones: int = 2) -> Dict[int, dict]:
-    """Etiqueta todos los grupos: lotes en paralelo -> validacion -> reparacion.
+                     max_reparaciones: int = 2, votos: int = 2) -> Dict[int, dict]:
+    """Etiqueta todos los grupos: lotes en paralelo -> votacion -> validacion -> reparacion.
 
-    La canonizacion de sub-temas se hace despues, de forma determinista, porque los lotes
-    corren en paralelo y no ven las etiquetas de los demas mientras trabajan.
+    Con `votos=2` cada lote se etiqueta dos veces y se toma la mayoria: los casos limite dejan de
+    bailar entre corridas (un empate en el tono cae a Neutro, que es la regla de prudencia).
+    La canonizacion de sub-temas se hace despues, de forma determinista, porque los lotes corren
+    en paralelo y no ven las etiquetas de los demas mientras trabajan.
     """
     if not grupos:
         return {}
+    votos = max(1, int(votos))
     lotes = [grupos[i:i + tam_lote] for i in range(0, len(grupos), tam_lote)]
     etiquetas: Dict[int, dict] = {}
     fallidos: List[int] = []
@@ -502,7 +534,10 @@ def etiquetar_grupos(cfg: dict, grupos: List[dict], progress: Optional[Callable]
 
     resultados = []
     with ThreadPoolExecutor(max_workers=max(1, int(workers))) as ex:
-        futuros = {ex.submit(trabajo, lote): lote for lote in lotes}
+        futuros = {}
+        for lote in lotes:
+            for _v in range(votos):
+                futuros[ex.submit(trabajo, lote)] = lote
         for fut in as_completed(futuros):
             lote = futuros[fut]
             try:
@@ -510,17 +545,32 @@ def etiquetar_grupos(cfg: dict, grupos: List[dict], progress: Optional[Callable]
             except Exception as e:
                 resultados.append((lote, {'__error__': str(e)[:200]}))
             hechos[0] += len(lote)
-            if progress:
-                pct = 70 + int(18 * hechos[0] / max(1, len(grupos)))
-                progress(min(92, pct), 'Analizando con IA… %d/%d grupos' % (hechos[0], len(grupos)))
+            if progress and hechos[0] % max(1, len(lotes)) == 0:
+                avance = min(1.0, hechos[0] / max(1, len(grupos) * votos))
+                progress(min(92, 70 + int(18 * avance)),
+                         'Analizando con IA… %d/%d grupos%s'
+                         % (min(hechos[0], len(grupos) * votos), len(grupos) * votos,
+                            ' (doble verificación)' if votos > 1 else ''))
 
     con_error = []
-    for lote, labels in resultados:
-        if '__error__' in labels:
-            con_error.append(labels['__error__'])
-            labels = {}
-        for g in lote:
-            etiquetas[g['grupo']] = labels.get(g['grupo'], {'sub_tema': '', 'tono': ''})
+    if votos > 1:
+        por_lote: Dict[int, List[Dict[int, dict]]] = defaultdict(list)
+        for lote, labels in resultados:
+            if '__error__' in labels:
+                con_error.append(labels['__error__'])
+                continue
+            por_lote[lote[0]['grupo']].append(labels)
+        for lote in lotes:
+            comb = _voto_mayoria(por_lote.get(lote[0]['grupo'], []), [g['grupo'] for g in lote])
+            for g in lote:
+                etiquetas[g['grupo']] = comb.get(g['grupo'], {'sub_tema': '', 'tono': ''})
+    else:
+        for lote, labels in resultados:
+            if '__error__' in labels:
+                con_error.append(labels['__error__'])
+                labels = {}
+            for g in lote:
+                etiquetas[g['grupo']] = labels.get(g['grupo'], {'sub_tema': '', 'tono': ''})
 
     # ---- reparacion secuencial de etiquetas invalidas (segunda vuelta al modelo) ----
     por_grupo = {g['grupo']: g for g in grupos}
@@ -665,6 +715,102 @@ def canonizar_cubos(temas: Dict[int, str], tax: dict) -> int:
     return cambios
 
 
+def derivar_reglas(cubos: Sequence[str]) -> List[dict]:
+    """Convierte una lista de cubos en reglas lexicas para el primer pase determinista.
+
+    Cada cubo aporta su nombre completo y sus palabras de contenido como claves exactas. Las reglas
+    se ordenan del cubo mas especifico (mas palabras) al mas general, para que gane el que mas
+    describe el hecho.
+    """
+    reglas = []
+    for nombre in cubos:
+        toks = [t for t in nz(nombre).split() if t]
+        claves = [nz(nombre)]
+        for t in toks:
+            if len(t) >= 4 and t not in CONECT and t not in FILLER and t not in MARCO and t not in claves:
+                claves.append(t)
+        if len(claves) > 1:
+            reglas.append({'tema': nombre, 'claves': claves})
+    reglas.sort(key=lambda r: -len(nz(r['tema']).split()))
+    return reglas
+
+
+def _muestreo_grupos(grupos: Sequence[dict], etiquetas: Dict[int, dict], por_bloque: int = 35,
+                     max_bloques: int = 12) -> List[List[str]]:
+    lineas = []
+    for g in grupos:
+        st_ = (etiquetas.get(g['grupo']) or {}).get('sub_tema') or ''
+        lineas.append('- %s | %s' % (st_[:60], sq(g['titulo'])[:110]))
+    if len(lineas) > por_bloque * max_bloques:
+        paso = max(1, len(lineas) // (por_bloque * max_bloques))
+        lineas = lineas[::paso]
+    return [lineas[i:i + por_bloque] for i in range(0, len(lineas), por_bloque)]
+
+
+def proponer_taxonomia(cfg: dict, grupos: List[dict], etiquetas: Dict[int, dict],
+                       objetivo: int = 16, progress: Optional[Callable] = None) -> dict:
+    """Construye la lista de Temas A PARTIR DEL CONTENIDO del archivo, sin lista fija.
+
+    Los clientes son muy distintos (universidades, sector publico, privado, marcas), asi que los
+    cubos se proponen leyendo los hechos del propio dossier: primero por bloques y despues con una
+    consolidacion que elimina duplicados y solapamientos.
+    """
+    if progress:
+        progress(93, 'Proponiendo la lista de Temas a partir del archivo…')
+    bloques = _muestreo_grupos(grupos, etiquetas)
+    propuestas: List[str] = []
+    for bloque in bloques:
+        msgs = [{'role': 'system', 'content':
+                 'Eres analista de medios en Colombia. Agrupas hechos en cubos tematicos. Respondes en JSON.'},
+                {'role': 'user', 'content':
+                 'Estos son hechos de un dossier de prensa:\n\n' + '\n'.join(bloque) +
+                 '\n\nPropón entre 10 y 14 CUBOS TEMATICOS que los agrupen, pensando en un cliente '
+                 'colombiano (puede ser universidad, entidad publica, empresa privada o marca).\n'
+                 'Reglas: nombres de 2 a 5 palabras; especificos de ESTOS hechos, no genericos; sin '
+                 'solaparse entre si; sin contar el nombre de la marca; nada de "Otros", "Varios", '
+                 '"General" ni "Informacion".\n'
+                 'Responde solo JSON: {"cubos":["Cubo uno","Cubo dos"]}'}]
+        try:
+            data = _json_loose(llamar_llm(cfg, msgs)) or {}
+        except Exception:
+            data = {}
+        for c in data.get('cubos', []) or []:
+            v = cubo_valido(c, {'temas': propuestas}, permitir_nuevos=True)
+            if v and not any(_mismo_cubo(v, p) for p in propuestas):
+                propuestas.append(v)
+
+    if not propuestas:
+        return taxonomia_por_nombre('Gobierno territorial')
+
+    # --- consolidacion final: una sola lista sin solapamientos ---
+    msgs = [{'role': 'system', 'content':
+             'Eres analista de medios en Colombia. Consolidas listas de cubos tematicos en JSON.'},
+            {'role': 'user', 'content':
+             'Estos cubos fueron propuestos por varios analistas para el mismo dossier:\n\n'
+             + '\n'.join('- %s' % p for p in propuestas) +
+             '\n\nDevuelve la LISTA FINAL de %d cubos (puede ser menos si no hay materia): sin '
+             'duplicados, sin solaparse, de 2 a 5 palabras, especificos, y sin "Otros" ni genericos.\n'
+             'Responde solo JSON: {"cubos":["..."]}' % objetivo}]
+    try:
+        data = _json_loose(llamar_llm(cfg, msgs)) or {}
+    except Exception:
+        data = {}
+    finales: List[str] = []
+    for c in data.get('cubos', []) or propuestas:
+        if not isinstance(c, str):
+            continue
+        v = cubo_valido(c, {'temas': finales}, permitir_nuevos=True)
+        if v and not any(_mismo_cubo(v, f) for f in finales):
+            finales.append(v)
+    if len(finales) < 3:
+        finales = propuestas[:max(3, objetivo)]
+    tax = {'nota': 'Cubos generados automaticamente a partir del contenido de este archivo.',
+           'temas': finales, 'reglas': derivar_reglas(finales)}
+    if progress:
+        progress(94, 'Lista de Temas generada: %d cubos' % len(finales))
+    return tax
+
+
 def asignar_temas(cfg: dict, grupos: List[dict], etiquetas: Dict[int, dict], tax: dict,
                   progress: Optional[Callable] = None) -> Tuple[Dict[int, str], Dict[int, str]]:
     temas, origen, pendientes = {}, {}, []
@@ -728,10 +874,17 @@ def enrich_rows_with_ai(
         'base_url': extra.get('base_url') or BASE_URL_DEFECTO,
         'timeout': int(extra.get('timeout', 120)),
     }
-    tax = extra.get('taxonomia') if isinstance(extra.get('taxonomia'), dict) else \
-        taxonomia_por_nombre(extra.get('taxonomia') or 'Gobierno territorial')
+    modo_tax = extra.get('taxonomia')
+    tax = None
+    if isinstance(modo_tax, dict):
+        tax = modo_tax
+    elif not modo_tax or str(modo_tax).lower().startswith('autom'):
+        tax = None  # se genera despues de etiquetar, con los hechos de este archivo
+    else:
+        tax = taxonomia_por_nombre(modo_tax)
     tam_lote = int(extra.get('tam_lote') or TAM_LOTE_DEFECTO)
     workers = int(extra.get('workers') or WORKERS_DEFECTO)
+    votos = int(extra.get('votos') or 2)
     umbral_titulo = int(extra.get('umbral_titulo') or UMBRAL_TITULO_DEFECTO)
     umbral_cuerpo = int(extra.get('umbral_cuerpo') or UMBRAL_CUERPO_DEFECTO)
     progreso = progress_callback or (lambda pct, msg: None)
@@ -751,10 +904,31 @@ def enrich_rows_with_ai(
     progreso(75, '%d grupos (notas equivalentes comparten etiqueta)' % len(grupos))
 
     # --- etiquetado ---
-    etiquetas = etiquetar_grupos(cfg, grupos, progreso, tam_lote=tam_lote, workers=workers)
+    etiquetas = etiquetar_grupos(cfg, grupos, progreso, tam_lote=tam_lote, workers=workers,
+                                 votos=votos)
     cambios = canonizar_subtemas(etiquetas)
     if cambios and progress_callback:
         progreso(93, 'Sub-temas unificados: %d' % cambios)
+
+    # --- lista de Temas: fija del cliente o generada desde el propio archivo ---
+    if tax is None:
+        tax = proponer_taxonomia(cfg, grupos, etiquetas,
+                                 objetivo=int(extra.get('cubos_objetivo') or 16),
+                                 progress=progress_callback and progreso)
+        _ULTIMO_RESUMEN['taxonomia'] = list(tax.get('temas') or [])
+        _ULTIMO_RESUMEN['modo_taxonomia'] = 'automatica'
+    else:
+        _ULTIMO_RESUMEN['taxonomia'] = list(tax.get('temas') or [])
+        _ULTIMO_RESUMEN['modo_taxonomia'] = 'fija'
+    _ULTIMO_RESUMEN['taxonomia_detalle'] = {'temas': list(tax.get('temas') or []),
+                                            'reglas': list(tax.get('reglas') or []),
+                                            'nota': tax.get('nota', '')}
+
+    corregidos = aplicar_guarda_tono(grupos, etiquetas, brand, aliases)
+    if corregidos:
+        _ULTIMO_RESUMEN['tono_corregido_por_guarda'] = corregidos
+        if progress_callback:
+            progreso(93, 'Guarda del tono: %d Negativos sin señalamiento pasaron a Neutro' % len(corregidos))
 
     # --- tema por reglas + lista cerrada ---
     temas, origen = asignar_temas(cfg, grupos, etiquetas, tax, progreso)
@@ -793,8 +967,67 @@ def enrich_rows_with_ai(
         row['Tema_IA'] = temas.get(gid) or _cubo_mas_cercano(e.get('sub_tema', ''), _titulo_fila(row, km), tax)
         row['Subtema_IA'] = e.get('sub_tema') or 'Hecho informativo'
 
+    _ULTIMO_RESUMEN['votos_tono'] = votos
     _ULTIMO_RESUMEN['filas'] = len(rows)
     _ULTIMO_RESUMEN['duplicadas'] = sum(1 for r in rows if r.get('is_duplicate'))
     if progress_callback:
         progreso(93, 'Etiquetado listo: %d grupos, %d cubos de tema' % (len(grupos), len(set(temas.values()))))
     return rows
+
+# ============================================================================
+# 9. Guarda determinista del tono: "el tema negativo no es tono negativo"
+# ============================================================================
+# El modelo pequeno tiende a marcar Negativo todo hecho tragico (un robo, El Nino, una protesta,
+# una cifra de suicidios). Esta guarda aplica en codigo la regla del criterio: Negativo SOLO si hay
+# un señalamiento dirigido a la marca, a su vocero o a una empresa del sector.
+CRITICA_PAT = re.compile(
+    r'(denunci|cuestion|sancion|critic|rechaz|exig|acusa|se[nñ]al|demand|investiga|irregular|'
+    r'sobrecosto|corrup|incumpl|multa|reclam|responsabiliz|se le atribuye)', re.I)
+VICTIMA_PAT = re.compile(
+    r'(\brobo\b|roban|rob[oa]ron|hurto|atrac|asalt|accidente|\bmuert|fallec|herid|inundaci|'
+    r'deslizamiento|incendio|sequ[ií]a|apag[oó]n|el ni[nñ]o|desempleo|suicid|\bprecio|alza|'
+    r'aumento|protesta|delincuencia|homicid|violencia|aguas residuales en)', re.I)
+BLANCO_EMPRESA = re.compile(r'(una empresa|una compa[nñ][ií]a|una firma|una industria|un frigor[ií]fico|'
+                            r'una planta|un matadero|una av[ií]cola|la empresa|la compa[nñ][ií]a)', re.I)
+NOMBRE_PROPIO = re.compile(r'(?<![.!?]\s)(?<![.!?])\b[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}')
+
+
+def _tema_negativo(texto: str) -> bool:
+    return bool(VICTIMA_PAT.search(ctrl(texto)))
+
+
+def _critica_dirigida(texto: str, brand: str, aliases: Sequence[str]) -> bool:
+    """True si el texto contiene un señalamiento con un blanco identificable (marca o nombre propio)."""
+    t = ctrl(texto)
+    if not t:
+        return False
+    nt = nz(t)
+    marcas = [m for m in [brand] + list(aliases) if m and len(str(m)) > 3]
+    for m in CRITICA_PAT.finditer(t):
+        cerca = nt[max(0, m.start() - 60): m.end() + 90]
+        if any(nz(x) and nz(x) in cerca for x in marcas):
+            return True
+        # el blanco tiene que estar pegado al verbo: si no, es una mencion incidental
+        # ('la denuncia oportuna de la comunidad permitio recuperar...' NO es un señalamiento).
+        ventana = t[m.end(): m.end() + 35]
+        if BLANCO_EMPRESA.search(ventana) or NOMBRE_PROPIO.search(ventana):
+            return True
+    return False
+
+
+def aplicar_guarda_tono(grupos: Sequence[dict], etiquetas: Dict[int, dict],
+                        brand: str, aliases: Sequence[str]) -> List[int]:
+    """Degrada a Neutro los Negativos que solo describen un hecho tragico, sin señalamiento dirigido.
+
+    Devuelve la lista de grupos corregidos (para la auditoria de la interfaz).
+    """
+    corregidos = []
+    for g in grupos:
+        e = etiquetas.get(g['grupo'])
+        if not e or e.get('tono') != 'Negativo':
+            continue
+        texto = '%s %s' % (g['titulo'], g.get('texto', ''))
+        if _tema_negativo(texto) and not _critica_dirigida(texto, brand, aliases):
+            e['tono'] = 'Neutro'
+            corregidos.append(g['grupo'])
+    return corregidos

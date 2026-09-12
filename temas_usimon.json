@@ -1,0 +1,122 @@
+{
+ "temas": [
+  "Innovación Educativa y Capacitación",
+  "Salud Mental y Prevención",
+  "Desarrollo Juvenil y Empleo",
+  "Seguridad y Criminología",
+  "Participación Comunitaria",
+  "Gestión Ambiental y Sostenibilidad",
+  "Eventos Internacionales y Congresos",
+  "Festividades y Cultura Tradicional",
+  "Transformación Laboral",
+  "Tecnologías y Delitos Digitales",
+  "Proyectos de Paz Barrial",
+  "Economía Circular y Sostenibilidad"
+ ],
+ "reglas": [
+  {
+   "tema": "Innovación Educativa y Capacitación",
+   "claves": [
+    "innovacion educativa y capacitacion",
+    "innovacion",
+    "educativa",
+    "capacitacion"
+   ]
+  },
+  {
+   "tema": "Salud Mental y Prevención",
+   "claves": [
+    "salud mental y prevencion",
+    "salud",
+    "mental",
+    "prevencion"
+   ]
+  },
+  {
+   "tema": "Desarrollo Juvenil y Empleo",
+   "claves": [
+    "desarrollo juvenil y empleo",
+    "desarrollo",
+    "juvenil",
+    "empleo"
+   ]
+  },
+  {
+   "tema": "Gestión Ambiental y Sostenibilidad",
+   "claves": [
+    "gestion ambiental y sostenibilidad",
+    "gestion",
+    "ambiental",
+    "sostenibilidad"
+   ]
+  },
+  {
+   "tema": "Eventos Internacionales y Congresos",
+   "claves": [
+    "eventos internacionales y congresos",
+    "internacionales",
+    "congresos"
+   ]
+  },
+  {
+   "tema": "Festividades y Cultura Tradicional",
+   "claves": [
+    "festividades y cultura tradicional",
+    "festividades",
+    "cultura",
+    "tradicional"
+   ]
+  },
+  {
+   "tema": "Tecnologías y Delitos Digitales",
+   "claves": [
+    "tecnologias y delitos digitales",
+    "tecnologias",
+    "delitos",
+    "digitales"
+   ]
+  },
+  {
+   "tema": "Proyectos de Paz Barrial",
+   "claves": [
+    "proyectos de paz barrial",
+    "proyectos",
+    "barrial"
+   ]
+  },
+  {
+   "tema": "Economía Circular y Sostenibilidad",
+   "claves": [
+    "economia circular y sostenibilidad",
+    "economia",
+    "circular",
+    "sostenibilidad"
+   ]
+  },
+  {
+   "tema": "Seguridad y Criminología",
+   "claves": [
+    "seguridad y criminologia",
+    "seguridad",
+    "criminologia"
+   ]
+  },
+  {
+   "tema": "Participación Comunitaria",
+   "claves": [
+    "participacion comunitaria",
+    "participacion",
+    "comunitaria"
+   ]
+  },
+  {
+   "tema": "Transformación Laboral",
+   "claves": [
+    "transformacion laboral",
+    "transformacion",
+    "laboral"
+   ]
+  }
+ ],
+ "nota": "Cubos generados automaticamente a partir del contenido de este archivo."
+}
