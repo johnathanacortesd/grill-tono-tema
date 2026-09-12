@@ -3,14 +3,12 @@
 # ======================================
 import html
 import io
-import json
 import logging
 import re
 import time
 import streamlit as st
 import pandas as pd
 
-from catalogo_tono_tema import CRITERIOS_TONO
 from pipeline import process_dossier
 from pkl_classifier import PklClassifierError, load_sklearn_estimator
 
@@ -216,22 +214,18 @@ def render_theme_toggle():
 def check_password():
     if st.session_state.get("password_correct", False):
         return True
-    configurada = bool(st.secrets.get("APP_PASSWORD"))
     st.markdown("""
     <div class="auth-wrap">
         <div class="auth-icon">◈</div>
         <div class="auth-title">Sistema de Limpieza y Análisis</div>
         <div class="auth-sub">Ingresa tus credenciales para continuar</div>
     </div>""", unsafe_allow_html=True)
-    if not configurada:
-        st.warning("⚠️ No hay APP_PASSWORD en los Secrets: configura una contraseña antes de "
-                   "publicar la app (Streamlit Cloud → Settings → Secrets).")
     _, col, _ = st.columns([1, 2, 1])
     with col:
         with st.form("pw"):
             pw = st.text_input("Contraseña", type="password", placeholder="Ingresa tu contraseña")
             if st.form_submit_button("Ingresar", use_container_width=True, type="primary"):
-                if configurada and pw == st.secrets.get("APP_PASSWORD"):
+                if pw == st.secrets.get("APP_PASSWORD", "INVALID"):
                     st.session_state["password_correct"] = True
                     st.rerun()
                 else:
@@ -395,7 +389,6 @@ def run_cleaning_process(df_file, file_meta=None, ai_config=None):
             raise
 
     st.session_state["medios_sin_mapear"] = result.get("medios_sin_mapear") or None
-    st.session_state["analisis"] = result.get("analisis") or {}
     st.session_state["output_data"] = result["output_data"]
     st.session_state["output_filename"] = result["output_filename"]
     st.session_state["processing_complete"] = True
@@ -425,7 +418,7 @@ def main():
         <div class="app-header-icon">◈</div>
         <div class="app-header-text">
             <div class="app-header-title">Limpieza y Análisis de Noticias</div>
-            <div class="app-header-version">v4.0 · Tono/Tema/Subtema por reglas + IA · Realizado por Johnathan Cortés</div>
+            <div class="app-header-version">v3.1 · IA Enriquecida · Realizado por Johnathan Cortés</div>
         </div>
         <div class="app-header-badge">Estructurador + IA</div>
     </div>""", unsafe_allow_html=True)
@@ -472,7 +465,7 @@ def main():
                 brand_input = st.text_input(
                     "Marca o Cliente Principal*",
                     placeholder="Ej: Universidad de Antioquia, Ecopetrol, Bancolombia",
-                    help="El tono se mide solo sobre esta marca, sus voceros y sus alias."
+                    help="La IA evaluará el sentimiento respecto a esta marca."
                 )
             with c_alias:
                 alias_input = st.text_input(
@@ -480,63 +473,6 @@ def main():
                     placeholder="Ej: UdeA; Alma Mater; rectoría; la universidad",
                     help="Variantes del nombre que deban atribuirse al cliente."
                 )
-
-            c_crit, c_voc = st.columns([3, 2])
-            with c_crit:
-                criterio = st.radio(
-                    "Criterio del tono",
-                    list(CRITERIOS_TONO.keys()),
-                    index=0,
-                    horizontal=False,
-                    help=("Aspectual estricto: la crítica dirigida a la marca es lo único Negativo "
-                          "(gobiernos, alcaldías, entidades públicas). Favorabilidad del sector: "
-                          "cuenta cómo queda parado el sector aunque la marca no sea el actor (gremios, "
-                          "cámaras, empresas de un sector)."),
-                )
-            with c_voc:
-                voceros_input = st.text_input(
-                    "Vocero(s) de la marca (opcional)",
-                    placeholder="Ej: Gonzalo Moreno; el rector",
-                    help="Personas cuyo nombre se atribuye a la marca para el tono."
-                )
-                tax_nombre = st.selectbox(
-                    "Lista de Temas",
-                    ["Automática según el archivo (recomendada)",
-                     "Gobierno territorial (21 cubos)",
-                     "Gremio o sector (16 cubos)"],
-                    index=0,
-                    help="Los clientes son muy distintos (universidades, sector público, privado, marcas), "
-                         "así que lo recomendado es que la lista de Temas se genere leyendo los hechos "
-                         "de este archivo. También puedes reutilizar la lista de un cliente concreta o "
-                         "cargar una en JSON.",
-                )
-
-            with st.expander("⚙ Ajustes finos del análisis (opcional)"):
-                ca, cb, cc, cd = st.columns(4)
-                with ca:
-                    tam_lote_input = st.slider("Grupos por llamada", 5, 30, 10, 1,
-                                               help="Con gpt-4.1-nano 10 funciona mejor.")
-                with cb:
-                    workers_input = st.slider("Llamadas en paralelo", 1, 8, 4, 1,
-                                              help="Sube para dossiers grandes; más hilos, más velocidad.")
-                with cc:
-                    umbral_titulo_input = st.slider("Similitud de titulares (%)", 75, 100, 92, 1,
-                                                    help="Bájalo para fusionar la misma noticia publicada por "
-                                                         "muchos medios con titulares distintos.")
-                with cd:
-                    umbral_cuerpo_input = st.slider("Similitud de resúmenes (%)", 70, 100, 85, 1)
-                tax_file = st.file_uploader(
-                    "Reutilizar la lista de Temas de un cliente (JSON, opcional)",
-                    type=["json"], key="tax_json",
-                    help="Si subes la lista que descargaste de un período anterior del mismo cliente, "
-                         "los Temas se mantienen idénticos entre meses (mejor para comparar).",
-                )
-                cubos_objetivo_input = st.slider("Cubos objetivo cuando la lista es automática", 8, 25, 16, 1)
-                votos_input = st.slider(
-                    "Verificaciones del tono por grupo", 1, 3, 2, 1,
-                    help="Cada grupo se etiqueta N veces y gana la mayoría; un empate cae a Neutro. "
-                         "Con 2 se reducen los vaivenes de los modelos pequeños; con 3 sube el costo "
-                         "una vez más.")
 
             st.markdown('<div class="sec-label">3. Modelos PKL del cliente (opcional)</div>', unsafe_allow_html=True)
             st.markdown(
@@ -585,16 +521,6 @@ def main():
                     aliases_parsed = [
                         a.strip() for a in re.split(r"[,;]", alias_input) if a.strip()
                     ]
-                    tax_cargada = None
-                    if tax_file is not None:
-                        try:
-                            tax_cargada = json.loads(tax_file.getvalue().decode("utf-8"))
-                            if not isinstance(tax_cargada, dict) or not tax_cargada.get("temas"):
-                                raise ValueError("el JSON debe traer la clave 'temas' con la lista de cubos")
-                            tax_cargada.setdefault("reglas", [])
-                        except Exception as exc:
-                            st.error(f"La lista de Temas (JSON) no es válida: {exc}")
-                            st.stop()
                     tone_bytes = f_tono.getvalue() if f_tono else None
                     theme_bytes = f_tema.getvalue() if f_tema else None
                     try:
@@ -612,24 +538,26 @@ def main():
                         "size": int(getattr(f1, "size", 0) or len(st.session_state["pending_dossier"])),
                     }
                     if enable_ai or tone_bytes or theme_bytes:
+                        # Ajustes del motor de Tono/Tema/Sub-tema: se leen de los Secrets para no
+                        # tocar la interfaz de Grill. Sin nada configurado, usa sus valores por defecto.
+                        def _sec_int(nombre, por_defecto):
+                            try:
+                                return int(st.secrets.get(nombre, por_defecto))
+                            except (TypeError, ValueError):
+                                return por_defecto
                         st.session_state["pending_ai_config"] = {
                             "enabled": bool(enable_ai),
                             "brand": brand_input.strip(),
                             "aliases": aliases_parsed,
-                            "voceros": [v.strip() for v in re.split(r"[,;]", voceros_input) if v.strip()],
-                            "criterio": criterio,
-                            "taxonomia": tax_cargada if tax_cargada else tax_nombre,
-                            "cubos_objetivo": int(cubos_objetivo_input),
-                            "votos": int(votos_input),
-                            "permitir_cubos_nuevos": True,
-                            "tam_lote": int(tam_lote_input),
-                            "workers": int(workers_input),
-                            "umbral_titulo": int(umbral_titulo_input),
-                            "umbral_cuerpo": int(umbral_cuerpo_input),
                             "api_key": api_key if enable_ai else None,
                             "model": "gpt-4.1-nano-2025-04-14",
                             "tone_pkl_bytes": tone_bytes,
                             "theme_pkl_bytes": theme_bytes,
+                            "voceros": [v.strip() for v in re.split(r"[,;]", st.secrets.get("VOCEROS", ""))
+                                        if v.strip()],
+                            "criterio": st.secrets.get("CRITERIO_TONO", ""),
+                            "votos": _sec_int("VERIFICACIONES_TONO", 2),
+                            "cubos_objetivo": _sec_int("CUBOS_OBJETIVO", 16),
                         }
                     else:
                         st.session_state["pending_ai_config"] = None
@@ -654,54 +582,6 @@ def main():
                 "⚠️ Medios sin región asignada en Sheets (quedaron N/A): "
                 f"{', '.join(medios_sin_mapear)}."
             )
-
-        analisis = st.session_state.get("analisis") or {}
-        if analisis:
-            grupos = analisis.get("grupos")
-            cubos_nuevos = analisis.get("cubos_nuevos") or []
-            reglas = analisis.get("temas_por_regla")
-            por_llm = analisis.get("temas_por_llm")
-            fallback = len(analisis.get("grupos_con_fallback") or [])
-            errores = analisis.get("errores_api") or []
-            guarda = len(analisis.get("tono_corregido_por_guarda") or [])
-            votos = analisis.get("votos_tono")
-            piezas = []
-            if grupos:
-                piezas.append(f"{grupos} hechos únicos agrupados")
-            if votos:
-                piezas.append(f"tono verificado {votos}× por grupo")
-            if guarda:
-                piezas.append(f"guarda del tono: {guarda} Negativos sin señalamiento pasaron a Neutro")
-            if reglas is not None:
-                piezas.append(f"Tema por reglas: {reglas} · por IA: {por_llm or 0}")
-            if cubos_nuevos:
-                piezas.append("Cubos nuevos específicos: " + ", ".join(cubos_nuevos[:4]))
-            if fallback:
-                piezas.append(f"⚠️ {fallback} etiquetas con respaldo determinista")
-            if piezas:
-                st.info("Análisis de Tono/Tema/Sub-tema · " + " · ".join(piezas))
-            if errores:
-                st.caption("Avisos del modelo: " + " | ".join(map(str, errores[:2])))
-            temas_gen = analisis.get("taxonomia") or []
-            detalle_tax = analisis.get("taxonomia_detalle") or {}
-            if temas_gen:
-                modo = analisis.get("modo_taxonomia")
-                etiqueta = ("generada desde el archivo" if modo == "automatica"
-                            else "lista fija del cliente")
-                with st.expander("Lista de Temas usada (%d cubos, %s)" % (len(temas_gen), etiqueta),
-                                 expanded=(modo == "automatica")):
-                    st.markdown(" · ".join("`%s`" % t for t in temas_gen))
-                    if detalle_tax:
-                        st.download_button(
-                            "⬇ Descargar lista de Temas (JSON) para reutilizarla",
-                            data=json.dumps(detalle_tax, ensure_ascii=False, indent=1),
-                            file_name="temas_%s.json" % str(
-                                st.session_state.get("output_filename", "cliente")).replace(".xlsx", ""),
-                            mime="application/json",
-                        )
-                        st.caption("Súbela en «Reutilizar la lista de Temas de un cliente» para que el "
-                                   "próximo período del mismo cliente use los mismos Temas y puedas "
-                                   "comparar entre meses.")
         
         st.markdown(f"""
         <div class="metrics-grid">
